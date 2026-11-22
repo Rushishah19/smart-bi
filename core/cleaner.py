@@ -1,6 +1,8 @@
 """Step 1 (Extract + Clean): load an Excel sheet and clean it, logging every change."""
 from __future__ import annotations
 
+import csv
+import io
 import re
 import warnings
 
@@ -49,6 +51,12 @@ def _dedupe(names: list[str]) -> list[str]:
     return out
 
 
+def _canonical(spellings: pd.Series) -> str:
+    """Pick the spelling to keep: the most common one; on a tie prefer 'Title Case', then a capital first letter."""
+    counts = spellings.value_counts()
+    return max(counts.index, key=lambda v: (counts[v], v == v.title(), v[:1].isupper()))
+
+
 def _try_numeric(s: pd.Series) -> tuple[pd.Series | None, bool]:
     """Convert strings like '$1,200', '45%', '(300)' to numbers if >=90% of values parse."""
     txt = s.dropna().astype(str).str.strip()
@@ -82,31 +90,64 @@ def _try_datetime(s: pd.Series) -> pd.Series | None:
     return full
 
 
-def clean(file, sheet_name=0, is_csv: bool = False) -> tuple[pd.DataFrame, list[str]]:
-    """Return (clean_df, log). `file` can be a path or a file-like object."""
-    log: list[str] = []
-    if is_csv:
-        try:
-            raw = pd.read_csv(file, header=None, encoding_errors="replace")
-        except Exception:
-            if hasattr(file, "seek"):
-                file.seek(0)
-            raw = pd.read_csv(file, header=None, sep=None, engine="python", encoding_errors="replace")
-        log.append(f"Loaded {raw.shape[0]} rows × {raw.shape[1]} columns (CSV).")
+def _read_csv(file) -> pd.DataFrame:
+    """Read a CSV, detecting the separator (comma, semicolon, tab or pipe) from the first lines."""
+    if hasattr(file, "read"):
+        data = file.read()
     else:
-        raw = pd.read_excel(file, sheet_name=sheet_name, header=None)
-        log.append(f"Loaded {raw.shape[0]} rows × {raw.shape[1]} columns (raw).")
+        with open(file, "rb") as f:
+            data = f.read()
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    sample = data[:20000].decode("utf-8", errors="replace")
+    if not sample.strip():
+        raise ValueError("The file has no data.")
+    try:
+        sep = csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
+    except csv.Error:
+        sep = ","  # single column or unusual file: fall back to commas
+    try:
+        return pd.read_csv(io.BytesIO(data), header=None, sep=sep, encoding_errors="replace")
+    except pd.errors.ParserError:  # ragged rows: let the python engine be forgiving
+        return pd.read_csv(io.BytesIO(data), header=None, sep=sep, engine="python",
+                           on_bad_lines="skip", encoding_errors="replace")
 
-    # Drop fully-empty rows/cols before header detection
+
+def _read_grid(file, sheet_name=0, is_csv: bool = False) -> pd.DataFrame:
+    """Read the file as a raw grid of cells (no header assumed)."""
+    if is_csv:
+        return _read_csv(file)
+    return pd.read_excel(file, sheet_name=sheet_name, header=None)
+
+
+def _apply_header(raw: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Drop empty rows/cols, find the header row and return (table, header_row_index)."""
     raw = raw.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
-
+    if raw.empty:
+        return raw, 0
     hdr = _find_header_row(raw)
-    if hdr > 0:
-        log.append(f"Detected header on row {hdr + 1}; skipped {hdr} title/blank rows above it.")
     cols = _dedupe([_clean_col_name(c, i) for i, c in enumerate(raw.iloc[hdr])])
     df = raw.iloc[hdr + 1:].copy()
     df.columns = cols
-    df = df.reset_index(drop=True)
+    return df.reset_index(drop=True), hdr
+
+
+def read_table(file, sheet_name=0, is_csv: bool = False) -> pd.DataFrame:
+    """The table *before* cleaning (header detected, nothing else changed). Used for the 'before' quality score."""
+    return _apply_header(_read_grid(file, sheet_name, is_csv))[0]
+
+
+def clean(file, sheet_name=0, is_csv: bool = False) -> tuple[pd.DataFrame, list[str]]:
+    """Return (clean_df, log). `file` can be a path or a file-like object."""
+    log: list[str] = []
+    raw = _read_grid(file, sheet_name, is_csv)
+    log.append(f"Loaded {raw.shape[0]} rows × {raw.shape[1]} columns ({'CSV' if is_csv else 'raw'}).")
+    if raw.dropna(how="all").empty:
+        raise ValueError("The file has no data.")
+
+    df, hdr = _apply_header(raw)
+    if hdr > 0:
+        log.append(f"Detected header on row {hdr + 1}; skipped {hdr} title/blank rows above it.")
 
     # Normalise text cells and null tokens
     for c in df.columns:
@@ -152,7 +193,7 @@ def clean(file, sheet_name=0, is_csv: bool = False) -> tuple[pd.DataFrame, list[
         if 0 < s.nunique() <= 50:
             lowered = s.str.lower().nunique()
             if lowered < s.nunique():
-                canon = s.groupby(s.str.lower()).agg(lambda x: x.value_counts().idxmax())
+                canon = s.groupby(s.str.lower()).agg(_canonical)
                 df[c] = col.map(lambda v: canon[str(v).lower()] if isinstance(v, str) else v)
                 log.append(f"'{c}': merged {s.nunique() - lowered} values that differed only by capitalisation.")
         df[c] = df[c].astype(object).where(df[c].notna(), None)
