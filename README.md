@@ -1,13 +1,13 @@
 # Smart BI Builder
 
-Upload a messy Excel sheet. The app cleans it, works out what each column holds, asks what you want to learn, ranks the best charts by how strong a pattern each one shows, and exports everything ready for **Power BI** or **Tableau**.
+Upload a messy Excel sheet or CSV file. The app cleans it, works out what each column holds, asks what you want to learn, ranks the best charts by how strong a pattern each one shows, and exports everything ready for **Power BI** or **Tableau**.
 
 ## Flow
 
 ```
- Excel file
+ Excel (.xlsx / .xls / .xlsm) or CSV file
     │
- [1] EXTRACT   cleaner.clean()        read sheet, auto-detect header row
+ [1] EXTRACT   cleaner.clean()        read sheet or CSV, auto-detect header row
     │
  [2] CLEAN     cleaner.clean()        trim text, N/A → blank, "$1,200"/"45%" → numbers,
     │                                 text → dates, fix casing, drop empty rows/cols & duplicates
@@ -52,6 +52,22 @@ Then open http://localhost:8501 and upload `sample/messy_sales.xlsx` to try it.
 
 **Power BI:** use Get Data → Excel and pick the `Data` sheet, or load the CSV with the M script provided. Add the DAX measures, then build each row of the `Chart Plan` sheet.
 **Tableau:** use Connect → Microsoft Excel and drag in `Data`. Each Chart Plan row tells you what goes on Columns, Rows and Color, and which mark type to use.
+
+## Changelog
+
+### v2.0
+- **CSV support**: upload `.csv` files as well as `.xlsm`; the separator (comma, semicolon, tab) is detected automatically and unreadable characters are replaced instead of crashing
+- **Error handling**: unreadable or corrupt files show a clear message instead of crashing the app
+- **More reliable uploads**: the file is read into memory once and reused, which works better with Streamlit's caching
+- **App config**: `.streamlit/config.toml` sets the port, headless mode, a 500 MB upload limit and turns off usage stats
+
+### v1.0
+- Full pipeline for Excel files (`.xlsx`, `.xls`): extract → clean → scan → score charts → ask → preview → export
+- Automatic cleaning with a log of every change: header detection, text trimming, number/percent/date conversion, casing fixes, empty row/column and duplicate removal
+- Column role detection (Measure / Category / Date / ID / Text) with Sum vs Average logic, editable by the user
+- Chart scoring 0–100 by signal strength, with goals ranked by how strong their answers are
+- Plotly previews with plain-English insights and Power BI / Tableau mapping
+- Exports: BI-ready Excel package, clean CSV, chart-plan JSON, Power Query M script, DAX measures
 
 ## Roadmap
 
