@@ -39,10 +39,25 @@ def run_clean(data: bytes, sheet, is_csv: bool = False):
     return cleaner.clean(io.BytesIO(data), sheet, is_csv=is_csv)
 
 
+def _safe_read_raw_table(data: bytes, sheet, is_csv: bool = False) -> pd.DataFrame:
+    if hasattr(cleaner, "read_table"):
+        return cleaner.read_table(io.BytesIO(data), sheet, is_csv=is_csv)
+    if is_csv:
+        raw = pd.read_csv(io.BytesIO(data), header=None, encoding_errors="replace")
+    else:
+        raw = pd.read_excel(io.BytesIO(data), sheet_name=sheet, header=None)
+    raw = raw.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
+    hdr = cleaner._find_header_row(raw) if hasattr(cleaner, "_find_header_row") else 0
+    df = raw.iloc[hdr + 1:].copy()
+    return df.reset_index(drop=True)
+
+
 @st.cache_data(show_spinner="Scoring data quality…")
 def run_quality(data: bytes, sheet, is_csv: bool, clean_df: pd.DataFrame):
-    before = quality.assess(cleaner.read_table(io.BytesIO(data), sheet, is_csv=is_csv))
-    return before, quality.assess(clean_df)
+    raw_df = _safe_read_raw_table(data, sheet, is_csv=is_csv)
+    before = quality.assess(raw_df)
+    after = quality.assess(clean_df)
+    return before, after
 
 
 try:
@@ -54,19 +69,25 @@ log = list(log)
 
 # ---------- 2. CLEAN + QUALITY ----------
 st.header("2 · Cleaning report")
-before, after = run_quality(file_bytes, sheet, is_csv, df)
-q1, q2, q3 = st.columns([1, 1, 2])
-q1.metric("Quality before", f"{before.score:.0f}/100")
-q2.metric("Quality after", f"{after.score:.0f}/100", delta=f"{after.score - before.score:+.1f}")
-q3.dataframe(pd.DataFrame({"Before": before.checks, "After": after.checks}).rename(index=str.capitalize),
-             width="stretch", height=180)
-with st.expander("Problems found in the original file", expanded=False):
-    for issue in before.issues or ["No problems found."]:
-        st.write("• " + issue)
-    if after.issues:
-        st.markdown("**Still present after cleaning:**")
-        for issue in after.issues:
+try:
+    before, after = run_quality(file_bytes, sheet, is_csv, df)
+except Exception as e:
+    before, after = None, None
+    st.warning(f"Quality assessment could not be generated: {e}")
+
+if before and after:
+    q1, q2, q3 = st.columns([1, 1, 2])
+    q1.metric("Quality before", f"{before.score:.0f}/100")
+    q2.metric("Quality after", f"{after.score:.0f}/100", delta=f"{after.score - before.score:+.1f}")
+    q3.dataframe(pd.DataFrame({"Before": before.checks, "After": after.checks}).rename(index=str.capitalize),
+                 width="stretch", height=180)
+    with st.expander("Problems found in the original file", expanded=False):
+        for issue in before.issues or ["No problems found."]:
             st.write("• " + issue)
+        if after.issues:
+            st.markdown("**Still present after cleaning:**")
+            for issue in after.issues:
+                st.write("• " + issue)
 
 c1, c2 = st.columns([1, 2])
 with c1:
